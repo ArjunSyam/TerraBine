@@ -13,7 +13,7 @@
 //screen changes
 #define SCREEN_WIDTH 680
 #define SCREEN_HEIGHT 720
-#define BACKGROUND_COLOR 0,0,0,255 //black
+#define BACKGROUND_COLOR 0,0,0,255 //blue
 
 //text changes
 #define TEXT_FONT "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"
