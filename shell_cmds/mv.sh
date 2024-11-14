@@ -13,4 +13,4 @@ if [ ! -e "$SOURCE" ]; then
   exit 1
 fi
 
-mv "$SOURCE" "$DESTINATION"
+/bin/mv "$SOURCE" "$DESTINATION"

@@ -1,15 +1,24 @@
 #!/bin/bash
 
-if [ "$1" ]; then
-  DIRECTORY="$1"
-else
-  echo "cd: missing operand"
-  exit 1
+# If no argument is provided, go to home directory
+if [ $# -eq 0 ]; then
+    cd "$HOME" 2>/dev/null
+    pwd
+    exit 0
 fi
 
-if [ -d "$DIRECTORY" ]; then
-  cd "$DIRECTORY"
+# Handle special case of "-" (previous directory)
+if [ "$1" = "-" ]; then
+    cd - 2>/dev/null
+    pwd
+    exit 0
+fi
+
+# Try to change to the specified directory
+if cd "$1" 2>/dev/null; then
+    pwd
+    exit 0
 else
-  echo "cd: $DIRECTORY: No such directory"
-  exit 1
+    echo "Directory '$1' does not exist" >&2
+    exit 1
 fi
