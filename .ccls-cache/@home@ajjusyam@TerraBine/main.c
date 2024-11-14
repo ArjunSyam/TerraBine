@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #include <linux/limits.h>
 
 //Input line values
@@ -163,171 +164,193 @@ char **split_line(char *cmd,InputLine * input) {
 
 //command argument execution
 void execute_args(char **cmd_args, InputLine *input) {
-  const char *builtin_cmds[] = {"ls", "cd", "mv", "pwd", "delete", "cat", "gcc"};
-  int check_presence = 0;
-
-  // Check if command is built-in
-  for (size_t i = 0; i < sizeof(builtin_cmds) / sizeof(builtin_cmds[0]); i++) {
-    if (strcmp(cmd_args[0], builtin_cmds[i]) == 0) {
-      check_presence = 1;
-      
-      char full_path[PATH_MAX];
-      // Get absolute path to shell_scripts directory
-      char abs_scripts_path[PATH_MAX];
-      
-      if (!realpath(input->shell_scripts_path, abs_scripts_path)) {
-        fprintf(stderr, "Failed to resolve shell scripts path\n");
-        return;
-      }
-      
-      // Handle 'cd' with cd.sh script
-      if (strcmp(builtin_cmds[i], "cd") == 0) {
-        if (!safe_path_join(full_path, sizeof(full_path), abs_scripts_path, "cd.sh")) {
-          fprintf(stderr, "Failed to construct cd.sh path\n");
-          return;
-        }
-      } else {
-        // For other commands, construct the full path
-        char script_name[PATH_MAX];
-        snprintf(script_name, sizeof(script_name), "%s.sh", cmd_args[0]);
-        if (!safe_path_join(full_path, sizeof(full_path), abs_scripts_path, script_name)) {
-          fprintf(stderr, "Failed to construct command path\n");
-          return;
-        }
-      }
-      
-      // Rest of your existing permission checking code...
-      struct stat st;
-      if (stat(full_path, &st) == 0) {
-          mode_t new_mode = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
-          if (chmod(full_path, new_mode) != 0) {
-              perror("Failed to set execute permissions");
-              return;
-          }
-      } else {
-          perror("Failed to get file status");
-          return;
-      }
-      
-      const char *original_cmd = builtin_cmds[i];
-
-      // Create new argument array
-      int arg_count = 0;
-      while (cmd_args[arg_count] != NULL) {
-          arg_count++;
-      }
-      
-      char **new_args = malloc((arg_count + 1) * sizeof(char *));
-      if (!new_args) {
-          perror("malloc failed");
-          return;
-      }
-      
-      new_args[0] = strdup(full_path);
-      if (!new_args[0]) {
-          free(new_args);
-          perror("strdup failed");
-          return;
-      }
-      
-      for (int j = 1; j < arg_count; j++) {
-          new_args[j] = strdup(cmd_args[j]);
-          if (!new_args[j]) {
-              for (int k = 0; k < j; k++) {
-                  free(new_args[k]);
-              }
-              free(new_args);
-              perror("strdup failed");
-              return;
-          }
-      }
-      new_args[arg_count] = NULL;
-
-      // Execute command
-      int Pipe_PtoC[2];
-      if (pipe(Pipe_PtoC) == -1) {
+    const char *builtin_cmds[] = {"ls", "cd", "mv", "pwd", "delete", "cat", "gcc", "touch"};
+    char exec_path[PATH_MAX];
+    char **exec_args = NULL;
+    int is_builtin = 0;
+    const char *original_cmd = NULL;
+    
+    // Initialize pipe and path
+    int Pipe_PtoC[2];
+    if (pipe(Pipe_PtoC) == -1) {
         perror("pipe failed");
-        goto cleanup;
-      }
+        return;
+    }
 
-      pid_t pid = fork();
-      if (pid == -1) {
+    // Determine command type and set up execution path
+    if (strncmp(cmd_args[0], "./", 2) == 0) {
+        // Handle executable file
+        if (!realpath(cmd_args[0] + 2, exec_path)) {
+            mvprintw(input->line++, 1, "Failed to resolve path: %s", cmd_args[0] + 2);
+            close(Pipe_PtoC[0]);
+            close(Pipe_PtoC[1]);
+            return;
+        }
+        
+        if (access(exec_path, X_OK) == -1) {
+            if (errno == ENOENT) {
+                mvprintw(input->line++, 1, "No such file: %s", cmd_args[0]);
+            } else {
+                mvprintw(input->line++, 1, "Permission denied: %s", cmd_args[0]);
+            }
+            close(Pipe_PtoC[0]);
+            close(Pipe_PtoC[1]);
+            return;
+        }
+        exec_args = cmd_args;
+        exec_args[0] = exec_path;
+    } else {
+        // Handle built-in commands
+        for (size_t i = 0; i < sizeof(builtin_cmds) / sizeof(builtin_cmds[0]); i++) {
+            if (strcmp(cmd_args[0], builtin_cmds[i]) == 0) {
+                is_builtin = 1;
+                original_cmd = builtin_cmds[i];
+                
+                char abs_scripts_path[PATH_MAX];
+                if (!realpath(input->shell_scripts_path, abs_scripts_path)) {
+                    fprintf(stderr, "Failed to resolve shell scripts path\n");
+                    close(Pipe_PtoC[0]);
+                    close(Pipe_PtoC[1]);
+                    return;
+                }
+                
+                // Construct script path
+                char script_name[PATH_MAX];
+                snprintf(script_name, sizeof(script_name), "%s.sh", cmd_args[0]);
+                if (!safe_path_join(exec_path, sizeof(exec_path), abs_scripts_path, script_name)) {
+                    fprintf(stderr, "Failed to construct script path\n");
+                    close(Pipe_PtoC[0]);
+                    close(Pipe_PtoC[1]);
+                    return;
+                }
+                
+                // Set execute permissions
+                struct stat st;
+                if (stat(exec_path, &st) == 0) {
+                    mode_t new_mode = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
+                    if (chmod(exec_path, new_mode) != 0) {
+                        perror("Failed to set execute permissions");
+                        close(Pipe_PtoC[0]);
+                        close(Pipe_PtoC[1]);
+                        return;
+                    }
+                }
+                
+                // Create new argument array
+                int arg_count = 0;
+                while (cmd_args[arg_count] != NULL) arg_count++;
+                
+                exec_args = malloc((arg_count + 1) * sizeof(char *));
+                if (!exec_args) {
+                    perror("malloc failed");
+                    close(Pipe_PtoC[0]);
+                    close(Pipe_PtoC[1]);
+                    return;
+                }
+                
+                exec_args[0] = strdup(exec_path);
+                if (!exec_args[0]) {
+                    free(exec_args);
+                    perror("strdup failed");
+                    close(Pipe_PtoC[0]);
+                    close(Pipe_PtoC[1]);
+                    return;
+                }
+                
+                for (int j = 1; j < arg_count; j++) {
+                    exec_args[j] = strdup(cmd_args[j]);
+                    if (!exec_args[j]) {
+                        for (int k = 0; k < j; k++) {
+                            free(exec_args[k]);
+                        }
+                        free(exec_args);
+                        perror("strdup failed");
+                        close(Pipe_PtoC[0]);
+                        close(Pipe_PtoC[1]);
+                        return;
+                    }
+                }
+                exec_args[arg_count] = NULL;
+                break;
+            }
+        }
+        
+        if (!is_builtin) {
+            mvprintw(input->line++, 1, "Command not found: %s", cmd_args[0]);
+            close(Pipe_PtoC[0]);
+            close(Pipe_PtoC[1]);
+            return;
+        }
+    }
+
+    // Execute command using single fork
+    pid_t pid = fork();
+    if (pid == -1) {
         perror("fork failed");
-        goto cleanup;
-      }
+        if (is_builtin) {
+            for (int j = 0; exec_args[j] != NULL; j++) {
+                free(exec_args[j]);
+            }
+            free(exec_args);
+        }
+        close(Pipe_PtoC[0]);
+        close(Pipe_PtoC[1]);
+        return;
+    }
 
-      if (pid == 0) { // Child process
+    if (pid == 0) { // Child process
         close(Pipe_PtoC[0]);
         dup2(Pipe_PtoC[1], STDOUT_FILENO);
         close(Pipe_PtoC[1]);
 
-        if (access(new_args[0], X_OK) == -1) {
-            fprintf(stderr, "Error: %s is not executable\n", new_args[0]);
-            exit(EXIT_FAILURE);
-        }
-
-        execv(new_args[0], new_args);
+        execv(exec_path, exec_args);
         perror("execv failed");
         exit(EXIT_FAILURE);
-      } else { // Parent process
+    } else { // Parent process
         close(Pipe_PtoC[1]);
         
-        if (strcmp(original_cmd, "cd") == 0) {
-          char new_cwd[PATH_MAX];
-          ssize_t nbytes = read(Pipe_PtoC[0], new_cwd, sizeof(new_cwd) - 1);
-          if (nbytes > 0) {
-              new_cwd[nbytes] = '\0';
-              char *newline_pos = strchr(new_cwd, '\n');
-              if (newline_pos) *newline_pos = '\0';
-              
-              if (chdir(new_cwd) == 0) {
-                  // Get absolute path of new working directory
-                  if (getcwd(input->cwd, sizeof(input->cwd)) != NULL) {
-                      // Update shell_scripts_path relative to the original scripts location
-                      char base_scripts_dir[PATH_MAX];
-                      strncpy(base_scripts_dir, abs_scripts_path, sizeof(base_scripts_dir));
-                      
-                      // Keep the original shell_scripts directory
-                      strncpy(input->shell_scripts_path, abs_scripts_path, sizeof(input->shell_scripts_path) - 1);
-                      input->shell_scripts_path[sizeof(input->shell_scripts_path) - 1] = '\0';
-
-                      // Update prompt
-                      char *username = getenv("USER");
-                      if (username) {
-                          safe_string_join(input->username, PATH_MAX, username, input->cwd, ":");
-                          strncat(input->username, "$ ", PATH_MAX - strlen(input->username) - 1);
-                      }
-                  }
-              } else {
-                  mvprintw(input->line++, 1, "Failed to change directory\n");
-              }
-          }
+        if (is_builtin && strcmp(original_cmd, "cd") == 0) {
+            char new_cwd[PATH_MAX];
+            ssize_t nbytes = read(Pipe_PtoC[0], new_cwd, sizeof(new_cwd) - 1);
+            if (nbytes > 0) {
+                new_cwd[nbytes] = '\0';
+                char *newline_pos = strchr(new_cwd, '\n');
+                if (newline_pos) *newline_pos = '\0';
+                
+                if (chdir(new_cwd) == 0) {
+                    if (getcwd(input->cwd, sizeof(input->cwd)) != NULL) {
+                        // Keep the original shell_scripts directory
+                        char *username = getenv("USER");
+                        if (username) {
+                            safe_string_join(input->username, PATH_MAX, username, input->cwd, ":");
+                            strncat(input->username, "$ ", PATH_MAX - strlen(input->username) - 1);
+                        }
+                    }
+                } else {
+                    mvprintw(input->line++, 1, "Failed to change directory\n");
+                }
+            }
         } else {
-          char buffer[1024];
-          ssize_t nbytes;
-          while ((nbytes = read(Pipe_PtoC[0], buffer, sizeof(buffer) - 1)) > 0) {
-            buffer[nbytes] = '\0';
-            display(buffer);
-          }
+            char buffer[1024];
+            ssize_t nbytes;
+            while ((nbytes = read(Pipe_PtoC[0], buffer, sizeof(buffer) - 1)) > 0) {
+                buffer[nbytes] = '\0';
+                display(buffer);
+            }
         }
 
         close(Pipe_PtoC[0]);
         int status;
         waitpid(pid, &status, 0);
 
-cleanup:
-        for (int j = 0; j < arg_count; j++) {
-            free(new_args[j]);
+        // Clean up if using built-in command
+        if (is_builtin) {
+            for (int j = 0; exec_args[j] != NULL; j++) {
+                free(exec_args[j]);
+            }
+            free(exec_args);
         }
-        free(new_args);
-        return;
-      }
     }
-  }
-
-  if (!check_presence) {
-    mvprintw(input->line++, 1, "Command not found: %s", cmd_args[0]);
-  }
 }
 int main(int argc, char **argv) {
   //init screen
